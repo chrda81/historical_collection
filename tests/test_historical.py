@@ -4,7 +4,6 @@
 """Tests for `freelancer_analysis` package."""
 
 import unittest
-from click.testing import CliRunner
 import os
 import sys
 from copy import deepcopy
@@ -13,17 +12,16 @@ from pymongo import MongoClient
 from pymongo.results import InsertOneResult, InsertManyResult
 
 from faker import Faker
-from freelancer_analysis.historical import Change, HistoricalCollection, PatchResult
-from freelancer_analysis import cli
-from freelancer_analysis.freelancer_analysis import (
-    DEFAULT_MONGO_DATABASE,
-    DEFAULT_MONGO_CLIENT_URL,
-)
 
 import logging
 import logging.config
 
-logging.basicConfig(level=logging.DEBUG, format=cli.LOGGING_FORMAT)
+from historical_collection.historical import HistoricalCollection, Change, PatchResult
+
+LOGGING_FORMAT = "[%(levelname)s] %(filename)s:%(lineno)d %(message)s"
+DEFAULT_MONGO_CLIENT_URL = "mongodb://localhost:27017/"
+
+logging.basicConfig(level=logging.DEBUG, format=LOGGING_FORMAT)
 log = logging.getLogger(__name__)
 
 fake = Faker()
@@ -47,46 +45,8 @@ class TestHistoricalCollection(unittest.TestCase):
         self.mongo.drop_database(self.db)
         log.debug("Destroyed test database %s", self.dbname)
 
-    def test_check_key(self):
-        collection = TestHistoricalCollection.MyCollection(self.db)
-        with self.assertRaises(AttributeError):
-            collection._check_key({"a": "b"})
-        with self.assertRaises(AttributeError):
-            collection._check_key({"id": 4}, {"a": 1, "b": 2})
-        with self.assertRaises(AttributeError):
-            collection._check_key({"id": 4}, {"id": 3})
-
-    def test_logic(self):
-        collection = TestHistoricalCollection.MyCollection(self.db)
-        cid = 12
-        first = {"id": cid, "a": 1, "b": 2, "c": 3}
-        second = {"id": cid, "b": "something", "c": 3, "d": 4}
-        expected = {"id": cid, "U": {"b": "something"}, "A": {"d": 4}, "R": ["a"]}
-        additions = collection._get_additions(first, second)
-        updates = collection._get_updates(first, second)
-        removals = collection._get_removals(first, second)
-        self.assertEqual(additions, expected["A"])
-        self.assertEqual(updates, expected["U"])
-        self.assertEqual(removals, expected["R"])
-
-    def test_create_pach(self):
-        collection = TestHistoricalCollection.MyCollection(self.db)
-        cid = 12
-        first = {"id": cid, "a": 1, "b": 2, "c": 3}
-        second = {"id": cid, "b": "something", "c": 3, "d": 4}
-        expected = {
-            "id": cid,
-            "deltas": {
-                Change.ADD: {"d": 4},
-                Change.UPDATE: {"b": "something"},
-                Change.REMOVE: ["a"],
-            },
-        }
-        deltas = collection._create_deltas(first, second)
-        patch = collection._create_patch({"id": cid}, deltas)
-        self.assertDictEqual(expected, patch)
-
     def mess_with_dict(self, d):
+        """Randomize a dict by adding/updating/deleting elements."""
         d = deepcopy(d)
         valid_keys = [
             k
@@ -104,6 +64,48 @@ class TestHistoricalCollection(unittest.TestCase):
         d[to_update] = fake.pylist(1, False, int, bool, float, str)
         return d
 
+    def test_check_key(self):
+        """Private function _check_key raises Exception if PK is not in doc."""
+        collection = TestHistoricalCollection.MyCollection(self.db)
+        with self.assertRaises(AttributeError):
+            collection._check_key({"a": "b"})
+        with self.assertRaises(AttributeError):
+            collection._check_key({"id": 4}, {"a": 1, "b": 2})
+        with self.assertRaises(AttributeError):
+            collection._check_key({"id": 4}, {"id": 3})
+
+    def test_logic(self):
+        """Basic delta logic is calculated successfully."""
+        collection = TestHistoricalCollection.MyCollection(self.db)
+        cid = 12
+        first = {"id": cid, "a": 1, "b": 2, "c": 3}
+        second = {"id": cid, "b": "something", "c": 3, "d": 4}
+        expected = {"id": cid, "U": {"b": "something"}, "A": {"d": 4}, "R": ["a"]}
+        additions = collection._get_additions(first, second)
+        updates = collection._get_updates(first, second)
+        removals = collection._get_removals(first, second)
+        self.assertEqual(additions, expected["A"])
+        self.assertEqual(updates, expected["U"])
+        self.assertEqual(removals, expected["R"])
+
+    def test_create_pach(self):
+        """A patch can be created based on two differing documents."""
+        collection = TestHistoricalCollection.MyCollection(self.db)
+        cid = 12
+        first = {"id": cid, "a": 1, "b": 2, "c": 3}
+        second = {"id": cid, "b": "something", "c": 3, "d": 4}
+        expected = {
+            "id": cid,
+            "deltas": {
+                Change.ADD: {"d": 4},
+                Change.UPDATE: {"b": "something"},
+                Change.REMOVE: ["a"],
+            },
+        }
+        deltas = collection._create_deltas(first, second)
+        patch = collection._create_patch({"id": cid}, deltas)
+        self.assertDictEqual(expected, patch)
+
     @unittest.skip("might not be failing")
     def test_gen_patch_series(self):
         collection = TestHistoricalCollection.MyCollection(self.db)
@@ -114,6 +116,7 @@ class TestHistoricalCollection(unittest.TestCase):
         deltas = collection._create_deltas(d1, d2)
 
     def test_patch_series(self):
+        """A patch can successfuly be applied."""
         collection = TestHistoricalCollection.MyCollection(self.db)
         cid = 12
         fltr = {"id": cid}
@@ -141,6 +144,7 @@ class TestHistoricalCollection(unittest.TestCase):
         self.assertDictEqual(last_revision, change)
 
     def test_find_revisions(self):
+        """More than one revision can be found if patch_*() is called."""
         collection = TestHistoricalCollection.MyCollection(self.db)
         cid = 12
         fltr = {"id": cid}
@@ -163,6 +167,7 @@ class TestHistoricalCollection(unittest.TestCase):
         collection.find(fltr)
 
     def test_revision_metadata(self):
+        """Metadata is returned for revisions and has changed between revisions."""
         collection = TestHistoricalCollection.MyCollection(self.db)
         cid = 12
         fltr = {"id": cid}
@@ -192,6 +197,7 @@ class TestHistoricalCollection(unittest.TestCase):
             self.assertEqual(rev["_revision_metadata"], {"i": i})
 
     def test_patch_many(self):
+        """Many patches can be applied to a document."""
         collection = TestHistoricalCollection.MyCollection(self.db)
         initial = [fake.pydict(10, True, int, float, bool, str) for i in range(0, 10)]
         for i in initial:
